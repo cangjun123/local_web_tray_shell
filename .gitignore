@@ -1,0 +1,19 @@
+# Build outputs
+dist/
+release/
+*.zip
+
+# Generated assets
+assets/switch.ico
+
+# Visual Studio / .NET
+.vs/
+bin/
+obj/
+*.user
+*.suo
+*.cache
+
+# Windows
+Thumbs.db
+Desktop.ini

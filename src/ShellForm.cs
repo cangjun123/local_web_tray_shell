@@ -1,0 +1,1643 @@
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.WinForms;
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+namespace LocalWebTrayShell
+{
+    internal sealed class ShellForm : Form
+    {
+        private const string AppName = "Switch";
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        private readonly NotifyIcon notifyIcon;
+        private readonly ContextMenuStrip trayMenu;
+        private readonly StatusStrip statusStrip;
+        private readonly ToolStripStatusLabel statusLabel;
+        private readonly TableLayoutPanel rootPanel;
+        private readonly Panel leftSidebar;
+        private readonly Panel brandPanel;
+        private readonly Panel collapsedSidebarPanel;
+        private readonly Panel commandSection;
+        private readonly Panel siteSection;
+        private readonly Panel workspacePanel;
+        private readonly Panel commandActionPanel;
+        private readonly Panel siteActionPanel;
+        private readonly Panel rightBody;
+        private readonly Panel webPanel;
+        private readonly Panel logsPanel;
+        private readonly Label appTitleLabel;
+        private readonly Label summaryLabel;
+        private readonly Label commandSectionTitle;
+        private readonly Label siteSectionTitle;
+        private readonly BufferedScrollPanel commandListPanel;
+        private readonly BufferedScrollPanel siteListPanel;
+        private readonly TableLayoutPanel commandListContent;
+        private readonly TableLayoutPanel siteListContent;
+        private readonly Button addCommandButton;
+        private readonly Button editCommandButton;
+        private readonly Button deleteCommandButton;
+        private readonly Button startStopCommandButton;
+        private readonly Button stopAllCommandsButton;
+        private readonly Button addSiteButton;
+        private readonly Button editSiteButton;
+        private readonly Button deleteSiteButton;
+        private readonly Button openSiteButton;
+        private readonly Button webViewModeButton;
+        private readonly Button logsViewModeButton;
+        private readonly Button toggleSidebarButton;
+        private readonly Button expandSidebarRailButton;
+        private readonly Label currentCommandLabel;
+        private readonly Label commandStatusBadge;
+        private readonly Button reloadSiteButton;
+        private readonly Button clearLogsButton;
+        private readonly Button copyLogsButton;
+        private readonly TextBox logsTextBox;
+        private readonly Panel webViewHost;
+        private readonly Timer uiRefreshTimer;
+        private readonly ToolStripMenuItem trayStartupMenuItem;
+        private readonly Dictionary<string, CommandSidebarCard> commandCards;
+        private readonly Dictionary<string, SiteSidebarCard> siteCards;
+        private readonly Dictionary<string, SiteViewState> siteViews;
+        private readonly CommandManager commandManager;
+        private readonly List<SiteEntry> sites;
+        private readonly List<CommandEntry> commands;
+        private CoreWebView2Environment webViewEnvironment;
+        private WorkspaceMode workspaceMode;
+        private SiteEntry currentSite;
+        private CommandEntry currentCommand;
+        private bool allowExit;
+        private bool trayHintShown;
+        private bool startupCommandsRequested;
+        private bool updatingStartupToggle;
+        private bool lastLogAutoScrollEnabled;
+        private bool sidebarHidden;
+        private int expandedSidebarWidth;
+
+        public ShellForm()
+        {
+            AppConfig config = AppConfigStore.Load();
+            Icon appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application;
+
+            commandManager = new CommandManager();
+            commandManager.RuntimeChanged += OnCommandRuntimeChanged;
+            commandCards = new Dictionary<string, CommandSidebarCard>(StringComparer.OrdinalIgnoreCase);
+            siteCards = new Dictionary<string, SiteSidebarCard>(StringComparer.OrdinalIgnoreCase);
+            siteViews = new Dictionary<string, SiteViewState>(StringComparer.OrdinalIgnoreCase);
+            sites = new List<SiteEntry>(config.Sites ?? new SiteEntry[0]);
+            commands = new List<CommandEntry>(config.Commands ?? new CommandEntry[0]);
+            commandManager.SyncCommands(commands);
+
+            workspaceMode = WorkspaceMode.Web;
+
+            Text = AppName;
+            Width = 1540;
+            Height = 930;
+            MinimumSize = new Size(1240, 760);
+            StartPosition = FormStartPosition.CenterScreen;
+            AutoScaleMode = AutoScaleMode.None;
+            Icon = appIcon;
+            BackColor = Color.FromArgb(241, 244, 248);
+
+            statusLabel = new ToolStripStatusLabel("\u6b63\u5728\u52a0\u8f7d\u5de5\u4f5c\u53f0...");
+            statusStrip = new StatusStrip();
+            statusStrip.Items.Add(statusLabel);
+
+            rootPanel = new TableLayoutPanel();
+            rootPanel.Dock = DockStyle.Fill;
+            rootPanel.BackColor = BackColor;
+            rootPanel.Margin = new Padding(0);
+            rootPanel.Padding = new Padding(0);
+            rootPanel.ColumnCount = 3;
+            rootPanel.RowCount = 1;
+            rootPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 390f));
+            rootPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 0f));
+            rootPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            rootPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+
+            leftSidebar = new Panel();
+            leftSidebar.Dock = DockStyle.Fill;
+            leftSidebar.Width = 390;
+            leftSidebar.BackColor = Color.FromArgb(248, 250, 252);
+            leftSidebar.Padding = new Padding(16, 16, 16, 16);
+            expandedSidebarWidth = leftSidebar.Width;
+
+            collapsedSidebarPanel = new Panel();
+            collapsedSidebarPanel.Dock = DockStyle.Fill;
+            collapsedSidebarPanel.Width = 0;
+            collapsedSidebarPanel.BackColor = Color.FromArgb(248, 250, 252);
+            collapsedSidebarPanel.Padding = new Padding(4, 12, 4, 12);
+
+            expandSidebarRailButton = CreateSecondaryButton(">", 4, 12, 28);
+            expandSidebarRailButton.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            expandSidebarRailButton.Height = 64;
+            expandSidebarRailButton.Font = new Font("Microsoft YaHei UI", 11f, FontStyle.Bold);
+            expandSidebarRailButton.TextAlign = ContentAlignment.MiddleCenter;
+            expandSidebarRailButton.Click += OnShowSidebarClicked;
+            collapsedSidebarPanel.Controls.Add(expandSidebarRailButton);
+
+            brandPanel = new Panel();
+            brandPanel.Dock = DockStyle.Top;
+            brandPanel.Height = 164;
+            brandPanel.BackColor = Color.White;
+            brandPanel.Padding = new Padding(18, 16, 18, 14);
+
+            TableLayoutPanel brandLayout = new TableLayoutPanel();
+            brandLayout.Dock = DockStyle.Fill;
+            brandLayout.Margin = new Padding(0);
+            brandLayout.Padding = new Padding(0);
+            brandLayout.ColumnCount = 2;
+            brandLayout.RowCount = 3;
+            brandLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            brandLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 132f));
+            brandLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42f));
+            brandLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44f));
+            brandLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42f));
+
+            appTitleLabel = new Label();
+            appTitleLabel.Text = "Switch \u63a7\u5236\u53f0";
+            appTitleLabel.Font = new Font("Microsoft YaHei UI", 14f, FontStyle.Bold);
+            appTitleLabel.AutoSize = false;
+            appTitleLabel.Dock = DockStyle.Fill;
+            appTitleLabel.Margin = new Padding(0);
+            appTitleLabel.TextAlign = ContentAlignment.MiddleLeft;
+
+            summaryLabel = new Label();
+            summaryLabel.Text = "\u672c\u5730\u7f51\u9875\u3001\u547d\u4ee4\u4e0e\u65e5\u5fd7\u7edf\u4e00\u7ba1\u7406\u3002";
+            summaryLabel.Font = new Font("Microsoft YaHei UI", 9f, FontStyle.Regular);
+            summaryLabel.ForeColor = Color.FromArgb(94, 102, 116);
+            summaryLabel.AutoSize = false;
+            summaryLabel.AutoEllipsis = true;
+            summaryLabel.Dock = DockStyle.Fill;
+            summaryLabel.Margin = new Padding(0, 10, 0, 0);
+            summaryLabel.TextAlign = ContentAlignment.TopLeft;
+
+            stopAllCommandsButton = CreateSecondaryButton("\u5168\u90e8\u505c\u6b62", 0, 0, 124);
+            stopAllCommandsButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            stopAllCommandsButton.Margin = new Padding(8, 2, 0, 0);
+            stopAllCommandsButton.Click += OnStopAllCommandsClicked;
+
+            toggleSidebarButton = CreateSecondaryButton("\u6536\u8d77", 0, 4, 60);
+            toggleSidebarButton.Click += OnToggleSidebarClicked;
+
+            webViewModeButton = CreateViewToggleButton("\u7f51\u9875", 0);
+            webViewModeButton.Click += delegate { SetWorkspaceMode(WorkspaceMode.Web); };
+            webViewModeButton.Location = new Point(64, 4);
+            webViewModeButton.Size = new Size(76, 34);
+            logsViewModeButton = CreateViewToggleButton("\u65e5\u5fd7", 1);
+            logsViewModeButton.Click += delegate { SetWorkspaceMode(WorkspaceMode.Logs); };
+            logsViewModeButton.Location = new Point(144, 4);
+            logsViewModeButton.Size = new Size(76, 34);
+
+            reloadSiteButton = CreateSecondaryButton("\u5237\u65b0\u9875\u9762", 224, 4, 98);
+            reloadSiteButton.Click += OnReloadSiteClicked;
+
+            TableLayoutPanel brandActionPanel = new TableLayoutPanel();
+            brandActionPanel.Dock = DockStyle.Fill;
+            brandActionPanel.Margin = new Padding(0);
+            brandActionPanel.Padding = new Padding(0);
+            brandActionPanel.ColumnCount = 4;
+            brandActionPanel.RowCount = 1;
+            brandActionPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25f));
+            brandActionPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25f));
+            brandActionPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25f));
+            brandActionPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25f));
+            brandActionPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+
+            toggleSidebarButton.Dock = DockStyle.Fill;
+            toggleSidebarButton.Location = Point.Empty;
+            toggleSidebarButton.Margin = new Padding(0, 4, 8, 0);
+            webViewModeButton.Dock = DockStyle.Fill;
+            webViewModeButton.Location = Point.Empty;
+            webViewModeButton.Margin = new Padding(0, 4, 8, 0);
+            logsViewModeButton.Dock = DockStyle.Fill;
+            logsViewModeButton.Location = Point.Empty;
+            logsViewModeButton.Margin = new Padding(0, 4, 8, 0);
+            reloadSiteButton.Dock = DockStyle.Fill;
+            reloadSiteButton.Location = Point.Empty;
+            reloadSiteButton.Margin = new Padding(0, 4, 0, 0);
+
+            brandActionPanel.Controls.Add(toggleSidebarButton, 0, 0);
+            brandActionPanel.Controls.Add(webViewModeButton, 1, 0);
+            brandActionPanel.Controls.Add(logsViewModeButton, 2, 0);
+            brandActionPanel.Controls.Add(reloadSiteButton, 3, 0);
+
+            brandLayout.Controls.Add(appTitleLabel, 0, 0);
+            brandLayout.Controls.Add(stopAllCommandsButton, 1, 0);
+            brandLayout.Controls.Add(summaryLabel, 0, 1);
+            brandLayout.Controls.Add(brandActionPanel, 0, 2);
+            brandLayout.SetColumnSpan(summaryLabel, 2);
+            brandLayout.SetColumnSpan(brandActionPanel, 2);
+
+            brandPanel.Controls.Add(brandLayout);
+
+            commandSection = new Panel();
+            commandSection.Dock = DockStyle.Top;
+            commandSection.Height = 388;
+            commandSection.Padding = new Padding(0, 16, 0, 0);
+
+            commandSectionTitle = new Label();
+            commandSectionTitle.Text = "\u547d\u4ee4";
+            commandSectionTitle.Font = new Font("Microsoft YaHei UI", 11f, FontStyle.Bold);
+            commandSectionTitle.Dock = DockStyle.Top;
+            commandSectionTitle.Height = 24;
+            commandSectionTitle.Margin = new Padding(0);
+            commandSectionTitle.TextAlign = ContentAlignment.MiddleLeft;
+
+            commandListPanel = new BufferedScrollPanel();
+            commandListPanel.Dock = DockStyle.Fill;
+            commandListPanel.BackColor = Color.FromArgb(248, 250, 252);
+            commandListPanel.BorderStyle = BorderStyle.None;
+            commandListPanel.Padding = new Padding(0);
+            commandListPanel.Margin = new Padding(0);
+            commandListPanel.Resize += OnCommandListPanelResize;
+
+            commandListContent = CreateSidebarListContent();
+            commandListPanel.Controls.Add(commandListContent);
+
+            commandActionPanel = new Panel();
+            commandActionPanel.Dock = DockStyle.Bottom;
+            commandActionPanel.Height = 44;
+            commandActionPanel.Margin = new Padding(0);
+
+            TableLayoutPanel commandActionLayout = new TableLayoutPanel();
+            commandActionLayout.Dock = DockStyle.Fill;
+            commandActionLayout.Margin = new Padding(0);
+            commandActionLayout.Padding = new Padding(0);
+            commandActionLayout.ColumnCount = 4;
+            commandActionLayout.RowCount = 1;
+            commandActionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25f));
+            commandActionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25f));
+            commandActionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25f));
+            commandActionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25f));
+            commandActionLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+
+            addCommandButton = CreatePrimaryButton("\u65b0\u589e", 0, 0, 80);
+            addCommandButton.Click += OnAddCommandClicked;
+            editCommandButton = CreateSecondaryButton("\u7f16\u8f91", 0, 0, 80);
+            editCommandButton.Click += OnEditCommandClicked;
+            deleteCommandButton = CreateSecondaryButton("\u5220\u9664", 0, 0, 80);
+            deleteCommandButton.Click += OnDeleteCommandClicked;
+            startStopCommandButton = CreatePrimaryButton("\u542f\u52a8", 0, 0, 80);
+            startStopCommandButton.Click += OnStartStopCommandClicked;
+
+            addCommandButton.Dock = DockStyle.Fill;
+            addCommandButton.Location = Point.Empty;
+            addCommandButton.Margin = new Padding(0, 0, 6, 0);
+            editCommandButton.Dock = DockStyle.Fill;
+            editCommandButton.Location = Point.Empty;
+            editCommandButton.Margin = new Padding(6, 0, 6, 0);
+            deleteCommandButton.Dock = DockStyle.Fill;
+            deleteCommandButton.Location = Point.Empty;
+            deleteCommandButton.Margin = new Padding(6, 0, 6, 0);
+            startStopCommandButton.Dock = DockStyle.Fill;
+            startStopCommandButton.Location = Point.Empty;
+            startStopCommandButton.Margin = new Padding(6, 0, 0, 0);
+
+            commandActionLayout.Controls.Add(addCommandButton, 0, 0);
+            commandActionLayout.Controls.Add(editCommandButton, 1, 0);
+            commandActionLayout.Controls.Add(deleteCommandButton, 2, 0);
+            commandActionLayout.Controls.Add(startStopCommandButton, 3, 0);
+            commandActionPanel.Controls.Add(commandActionLayout);
+
+            commandSection.Controls.Add(commandListPanel);
+            commandSection.Controls.Add(commandActionPanel);
+            commandSection.Controls.Add(commandSectionTitle);
+
+            siteSection = new Panel();
+            siteSection.Dock = DockStyle.Fill;
+            siteSection.Padding = new Padding(0, 16, 0, 0);
+
+            siteSectionTitle = new Label();
+            siteSectionTitle.Text = "\u7ad9\u70b9";
+            siteSectionTitle.Font = new Font("Microsoft YaHei UI", 11f, FontStyle.Bold);
+            siteSectionTitle.Dock = DockStyle.Top;
+            siteSectionTitle.Height = 24;
+            siteSectionTitle.Margin = new Padding(0);
+            siteSectionTitle.TextAlign = ContentAlignment.MiddleLeft;
+
+            siteListPanel = new BufferedScrollPanel();
+            siteListPanel.Dock = DockStyle.Fill;
+            siteListPanel.BackColor = Color.FromArgb(248, 250, 252);
+            siteListPanel.BorderStyle = BorderStyle.None;
+            siteListPanel.Padding = new Padding(0);
+            siteListPanel.Margin = new Padding(0);
+            siteListPanel.Resize += OnSiteListPanelResize;
+
+            siteListContent = CreateSidebarListContent();
+            siteListPanel.Controls.Add(siteListContent);
+
+            siteActionPanel = new Panel();
+            siteActionPanel.Dock = DockStyle.Bottom;
+            siteActionPanel.Height = 44;
+            siteActionPanel.Margin = new Padding(0);
+
+            TableLayoutPanel siteActionLayout = new TableLayoutPanel();
+            siteActionLayout.Dock = DockStyle.Fill;
+            siteActionLayout.Margin = new Padding(0);
+            siteActionLayout.Padding = new Padding(0);
+            siteActionLayout.ColumnCount = 4;
+            siteActionLayout.RowCount = 1;
+            siteActionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25f));
+            siteActionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25f));
+            siteActionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25f));
+            siteActionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25f));
+            siteActionLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+
+            addSiteButton = CreatePrimaryButton("\u65b0\u589e", 0, 0, 80);
+            addSiteButton.Click += OnAddSiteClicked;
+            editSiteButton = CreateSecondaryButton("\u7f16\u8f91", 0, 0, 80);
+            editSiteButton.Click += OnEditSiteClicked;
+            deleteSiteButton = CreateSecondaryButton("\u5220\u9664", 0, 0, 80);
+            deleteSiteButton.Click += OnDeleteSiteClicked;
+            openSiteButton = CreateSecondaryButton("\u6253\u5f00", 0, 0, 80);
+            openSiteButton.Click += OnOpenSiteClicked;
+
+            addSiteButton.Dock = DockStyle.Fill;
+            addSiteButton.Location = Point.Empty;
+            addSiteButton.Margin = new Padding(0, 0, 6, 0);
+            editSiteButton.Dock = DockStyle.Fill;
+            editSiteButton.Location = Point.Empty;
+            editSiteButton.Margin = new Padding(6, 0, 6, 0);
+            deleteSiteButton.Dock = DockStyle.Fill;
+            deleteSiteButton.Location = Point.Empty;
+            deleteSiteButton.Margin = new Padding(6, 0, 6, 0);
+            openSiteButton.Dock = DockStyle.Fill;
+            openSiteButton.Location = Point.Empty;
+            openSiteButton.Margin = new Padding(6, 0, 0, 0);
+
+            siteActionLayout.Controls.Add(addSiteButton, 0, 0);
+            siteActionLayout.Controls.Add(editSiteButton, 1, 0);
+            siteActionLayout.Controls.Add(deleteSiteButton, 2, 0);
+            siteActionLayout.Controls.Add(openSiteButton, 3, 0);
+            siteActionPanel.Controls.Add(siteActionLayout);
+
+            siteSection.Controls.Add(siteListPanel);
+            siteSection.Controls.Add(siteActionPanel);
+            siteSection.Controls.Add(siteSectionTitle);
+
+            leftSidebar.Controls.Add(siteSection);
+            leftSidebar.Controls.Add(commandSection);
+            leftSidebar.Controls.Add(brandPanel);
+
+            workspacePanel = new Panel();
+            workspacePanel.Dock = DockStyle.Fill;
+            workspacePanel.Padding = new Padding(18, 18, 18, 18);
+            workspacePanel.BackColor = BackColor;
+
+            rightBody = new Panel();
+            rightBody.Dock = DockStyle.Fill;
+            rightBody.Padding = new Padding(0);
+
+            webPanel = new Panel();
+            webPanel.Dock = DockStyle.Fill;
+            webPanel.BackColor = Color.White;
+            webPanel.Padding = new Padding(16, 16, 16, 16);
+
+            webViewHost = new Panel();
+            webViewHost.Dock = DockStyle.Fill;
+            webViewHost.BackColor = Color.FromArgb(225, 230, 236);
+            webViewHost.Padding = new Padding(0);
+
+            webPanel.Controls.Add(webViewHost);
+
+            logsPanel = new Panel();
+            logsPanel.Dock = DockStyle.Fill;
+            logsPanel.BackColor = Color.White;
+            logsPanel.Padding = new Padding(16, 16, 16, 16);
+
+            currentCommandLabel = new Label();
+            currentCommandLabel.Text = "\u672a\u9009\u62e9\u547d\u4ee4";
+            currentCommandLabel.Font = new Font("Microsoft YaHei UI", 12f, FontStyle.Bold);
+            currentCommandLabel.AutoSize = true;
+            currentCommandLabel.Location = new Point(0, 4);
+
+            commandStatusBadge = new Label();
+            commandStatusBadge.Text = "\u5df2\u505c\u6b62";
+            commandStatusBadge.AutoSize = false;
+            commandStatusBadge.TextAlign = ContentAlignment.MiddleCenter;
+            commandStatusBadge.Size = new Size(104, 30);
+            commandStatusBadge.Location = new Point(340, 0);
+            commandStatusBadge.BackColor = Color.FromArgb(234, 239, 244);
+            commandStatusBadge.ForeColor = Color.FromArgb(79, 89, 100);
+            commandStatusBadge.Font = new Font("Microsoft YaHei UI", 9f, FontStyle.Bold);
+
+            clearLogsButton = CreateSecondaryButton("\u6e05\u7a7a\u65e5\u5fd7", 0, 0, 96);
+            clearLogsButton.Click += OnClearLogsClicked;
+            copyLogsButton = CreateSecondaryButton("\u590d\u5236\u65e5\u5fd7", 108, 0, 96);
+            copyLogsButton.Click += OnCopyLogsClicked;
+
+            Panel logsToolbar = new Panel();
+            logsToolbar.Dock = DockStyle.Top;
+            logsToolbar.Height = 44;
+
+            Panel logsTitlePanel = new Panel();
+            logsTitlePanel.Dock = DockStyle.Left;
+            logsTitlePanel.Width = 470;
+            logsTitlePanel.Controls.Add(currentCommandLabel);
+            logsTitlePanel.Controls.Add(commandStatusBadge);
+
+            Panel logsActionPanel = new Panel();
+            logsActionPanel.Dock = DockStyle.Right;
+            logsActionPanel.Width = 210;
+            logsActionPanel.Controls.Add(clearLogsButton);
+            logsActionPanel.Controls.Add(copyLogsButton);
+
+            logsToolbar.Controls.Add(logsActionPanel);
+            logsToolbar.Controls.Add(logsTitlePanel);
+
+            logsTextBox = new TextBox();
+            logsTextBox.Dock = DockStyle.Fill;
+            logsTextBox.Multiline = true;
+            logsTextBox.ReadOnly = true;
+            logsTextBox.ScrollBars = ScrollBars.Both;
+            logsTextBox.WordWrap = false;
+            logsTextBox.BackColor = Color.FromArgb(15, 23, 32);
+            logsTextBox.ForeColor = Color.FromArgb(221, 230, 242);
+            logsTextBox.Font = new Font("Cascadia Mono", 10f, FontStyle.Regular);
+
+            logsPanel.Controls.Add(logsTextBox);
+            logsPanel.Controls.Add(logsToolbar);
+
+            rightBody.Controls.Add(webPanel);
+            rightBody.Controls.Add(logsPanel);
+
+            workspacePanel.Controls.Add(rightBody);
+
+            rootPanel.Controls.Add(leftSidebar, 0, 0);
+            rootPanel.Controls.Add(collapsedSidebarPanel, 1, 0);
+            rootPanel.Controls.Add(workspacePanel, 2, 0);
+
+            Controls.Add(rootPanel);
+            Controls.Add(statusStrip);
+
+            trayMenu = new ContextMenuStrip();
+            trayMenu.Items.Add("\u6253\u5f00\u4e3b\u754c\u9762", null, delegate { RestoreFromTray(); });
+            trayMenu.Items.Add("\u663e\u793a\u63a7\u5236\u53f0", null, delegate { RestoreFromTray(); SetSidebarHidden(false); });
+            trayMenu.Items.Add("\u5237\u65b0\u5f53\u524d\u9875\u9762", null, delegate { ReloadCurrentSite(); });
+            trayMenu.Items.Add("\u5168\u90e8\u505c\u6b62\u547d\u4ee4", null, delegate { commandManager.StopAll(); });
+            trayStartupMenuItem = new ToolStripMenuItem("\u5f00\u673a\u81ea\u542f");
+            trayStartupMenuItem.CheckOnClick = true;
+            trayStartupMenuItem.Click += OnTrayStartupMenuClicked;
+            trayMenu.Items.Add(trayStartupMenuItem);
+            trayMenu.Items.Add(new ToolStripSeparator());
+            trayMenu.Items.Add("\u9000\u51fa", null, delegate { ExitApplication(); });
+
+            notifyIcon = new NotifyIcon();
+            notifyIcon.Icon = appIcon;
+            notifyIcon.Text = AppName;
+            notifyIcon.ContextMenuStrip = trayMenu;
+            notifyIcon.Visible = true;
+            notifyIcon.DoubleClick += delegate { RestoreFromTray(); };
+
+            uiRefreshTimer = new Timer();
+            uiRefreshTimer.Interval = 1000;
+            uiRefreshTimer.Tick += OnUiRefreshTimerTick;
+
+            updatingStartupToggle = true;
+            trayStartupMenuItem.Checked = WindowsStartupManager.IsEnabled();
+            updatingStartupToggle = false;
+
+            Shown += OnShown;
+            Resize += OnResize;
+            FormClosing += OnFormClosing;
+
+            RefreshCommandList();
+            RefreshSiteList();
+            SetWorkspaceMode(WorkspaceMode.Web);
+            RefreshCommandButtons();
+            RefreshSiteButtons();
+            UpdateStatusSummary();
+        }
+
+        private async void OnShown(object sender, EventArgs e)
+        {
+            try
+            {
+                webViewEnvironment = await CoreWebView2Environment.CreateAsync(
+                    null,
+                    AppPaths.WebViewUserDataDirectory);
+
+                statusLabel.Text = "\u5de5\u4f5c\u53f0\u5df2\u5c31\u7eea\u3002";
+                uiRefreshTimer.Start();
+
+                if (sites.Count > 0)
+                {
+                    SelectSite(sites[0]);
+                }
+
+                if (commands.Count > 0)
+                {
+                    SelectCommand(commands[0]);
+                }
+
+                if (!startupCommandsRequested)
+                {
+                    startupCommandsRequested = true;
+                    commandManager.StartEnabledCommands(commands);
+                }
+            }
+            catch (Exception ex)
+            {
+                statusLabel.Text = "WebView2 \u521d\u59cb\u5316\u5931\u8d25\u3002";
+                MessageBox.Show(
+                    "\u65e0\u6cd5\u521d\u59cb\u5316 WebView2\u3002\r\n\r\n" + ex.Message,
+                    AppName,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
+        private void OnUiRefreshTimerTick(object sender, EventArgs e)
+        {
+            RefreshCommandCardsState();
+            RefreshCommandButtons();
+            RefreshLogsView();
+            UpdateStatusSummary();
+        }
+
+        private void OnCommandRuntimeChanged(object sender, CommandRuntimeChangedEventArgs e)
+        {
+            if (!IsHandleCreated)
+            {
+                return;
+            }
+
+            BeginInvoke(new Action(
+                delegate
+                {
+                    RefreshCommandCardState(e.CommandId);
+                    RefreshCommandButtons();
+                    RefreshLogsView();
+                    UpdateStatusSummary();
+                }));
+        }
+
+        private void RefreshCommandList()
+        {
+            commandCards.Clear();
+            commandListContent.SuspendLayout();
+
+            try
+            {
+                commandListContent.Controls.Clear();
+                commandListContent.RowStyles.Clear();
+                commandListContent.RowCount = 0;
+
+                for (int index = 0; index < commands.Count; index++)
+                {
+                    CommandEntry command = commands[index];
+                    CommandSidebarCard card = new CommandSidebarCard();
+
+                    card.Dock = DockStyle.Top;
+                    card.Bind(command, commandManager.GetSnapshot(command.Id));
+                    card.Selected = currentCommand != null &&
+                        string.Equals(currentCommand.Id, command.Id, StringComparison.OrdinalIgnoreCase);
+                    card.CardClicked += OnCommandCardClicked;
+
+                    commandCards[command.Id] = card;
+                    commandListContent.RowCount += 1;
+                    commandListContent.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                    commandListContent.Controls.Add(card, 0, commandListContent.RowCount - 1);
+                }
+            }
+            finally
+            {
+                commandListContent.ResumeLayout();
+            }
+
+            ConstrainSidebarListWidth(commandListPanel, commandListContent);
+        }
+
+        private void RefreshSiteList()
+        {
+            siteCards.Clear();
+            siteListContent.SuspendLayout();
+
+            try
+            {
+                siteListContent.Controls.Clear();
+                siteListContent.RowStyles.Clear();
+                siteListContent.RowCount = 0;
+
+                for (int index = 0; index < sites.Count; index++)
+                {
+                    SiteEntry site = sites[index];
+                    SiteSidebarCard card = new SiteSidebarCard();
+
+                    card.Dock = DockStyle.Top;
+                    card.Bind(site);
+                    card.Selected = currentSite != null &&
+                        string.Equals(currentSite.Id, site.Id, StringComparison.OrdinalIgnoreCase);
+                    card.CardClicked += OnSiteCardClicked;
+
+                    siteCards[site.Id] = card;
+                    siteListContent.RowCount += 1;
+                    siteListContent.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                    siteListContent.Controls.Add(card, 0, siteListContent.RowCount - 1);
+                }
+            }
+            finally
+            {
+                siteListContent.ResumeLayout();
+            }
+
+            ConstrainSidebarListWidth(siteListPanel, siteListContent);
+        }
+
+        private void OnCommandCardClicked(object sender, EventArgs e)
+        {
+            CommandSidebarCard card = sender as CommandSidebarCard;
+
+            if (card != null && card.Command != null)
+            {
+                SelectCommand(card.Command);
+            }
+        }
+
+        private void OnSiteCardClicked(object sender, EventArgs e)
+        {
+            SiteSidebarCard card = sender as SiteSidebarCard;
+
+            if (card != null && card.SiteEntry != null)
+            {
+                SelectSite(card.SiteEntry);
+            }
+        }
+
+        private void SelectCommand(CommandEntry command)
+        {
+            currentCommand = command;
+            UpdateCommandSelectionVisuals();
+            RefreshCommandButtons();
+            RefreshLogsView();
+            SetWorkspaceMode(WorkspaceMode.Logs);
+        }
+
+        private void SelectSite(SiteEntry site)
+        {
+            currentSite = site;
+            UpdateSiteSelectionVisuals();
+            RefreshSiteButtons();
+            SetWorkspaceMode(WorkspaceMode.Web);
+        }
+
+        private async void ShowSite(SiteEntry site)
+        {
+            SiteViewState state;
+
+            if (site == null)
+            {
+                return;
+            }
+
+            if (webViewEnvironment == null)
+            {
+                statusLabel.Text = "\u7f51\u9875\u5de5\u4f5c\u533a\u4ecd\u5728\u542f\u52a8\u4e2d\u3002";
+                return;
+            }
+
+            state = GetOrCreateSiteView(site);
+
+            foreach (Control control in webViewHost.Controls)
+            {
+                control.Visible = false;
+            }
+
+            state.WebView.Visible = true;
+            state.WebView.BringToFront();
+            statusLabel.Text = state.IsInitialized
+                ? "\u5df2\u5207\u6362\u5230 " + site.Name
+                : "\u6b63\u5728\u6253\u5f00 " + site.Name + "...";
+
+            if (state.InitializationStarted)
+            {
+                if (state.IsInitialized &&
+                    state.WebView.CoreWebView2 != null &&
+                    !string.Equals(state.LastNavigatedUrl, site.Url, StringComparison.OrdinalIgnoreCase))
+                {
+                    state.LastNavigatedUrl = site.Url;
+                    state.WebView.CoreWebView2.Navigate(site.Url);
+                }
+
+                return;
+            }
+
+            state.InitializationStarted = true;
+
+            try
+            {
+                await state.WebView.EnsureCoreWebView2Async(webViewEnvironment);
+                state.WebView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
+                state.WebView.CoreWebView2.Settings.AreDevToolsEnabled = true;
+                state.IsInitialized = true;
+                state.LastNavigatedUrl = site.Url;
+                state.WebView.CoreWebView2.Navigate(site.Url);
+            }
+            catch (Exception ex)
+            {
+                statusLabel.Text = "\u65e0\u6cd5\u6253\u5f00 " + site.Name;
+                MessageBox.Show(
+                    "\u65e0\u6cd5\u6253\u5f00 " + site.Url + "\u3002\r\n\r\n" + ex.Message,
+                    AppName,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
+        private SiteViewState GetOrCreateSiteView(SiteEntry site)
+        {
+            SiteViewState state;
+
+            if (siteViews.TryGetValue(site.Id, out state))
+            {
+                state.Site = site;
+                return state;
+            }
+
+            state = new SiteViewState();
+            state.Site = site;
+            state.WebView = new WebView2();
+            state.WebView.Dock = DockStyle.Fill;
+            state.WebView.Visible = false;
+            state.WebView.Margin = new Padding(0);
+            state.WebView.Tag = state;
+            state.WebView.NavigationStarting += OnNavigationStarting;
+            state.WebView.NavigationCompleted += OnNavigationCompleted;
+
+            webViewHost.Controls.Add(state.WebView);
+            siteViews[site.Id] = state;
+            return state;
+        }
+
+        private void OnNavigationStarting(object sender, CoreWebView2NavigationStartingEventArgs e)
+        {
+            SiteViewState state = GetSiteState(sender);
+
+            if (state != null && currentSite != null &&
+                string.Equals(state.Site.Id, currentSite.Id, StringComparison.OrdinalIgnoreCase))
+            {
+                statusLabel.Text = "\u6b63\u5728\u52a0\u8f7d " + state.Site.Name + " - " + e.Uri;
+            }
+        }
+
+        private void OnNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
+        {
+            SiteViewState state = GetSiteState(sender);
+
+            if (state == null || currentSite == null ||
+                !string.Equals(state.Site.Id, currentSite.Id, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            statusLabel.Text = e.IsSuccess
+                ? "\u5df2\u52a0\u8f7d " + state.Site.Name
+                : "\u65e0\u6cd5\u8bbf\u95ee " + state.Site.Url;
+        }
+
+        private SiteViewState GetSiteState(object sender)
+        {
+            WebView2 webView = sender as WebView2;
+
+            if (webView == null)
+            {
+                return null;
+            }
+
+            return webView.Tag as SiteViewState;
+        }
+
+        private void OnAddCommandClicked(object sender, EventArgs e)
+        {
+            using (CommandDialog dialog = new CommandDialog(null, false))
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK || dialog.Result == null)
+                {
+                    return;
+                }
+
+                commands.Add(dialog.Result);
+                PersistAndSyncCommands();
+                RefreshCommandList();
+                SelectCommand(dialog.Result);
+            }
+        }
+
+        private void OnEditCommandClicked(object sender, EventArgs e)
+        {
+            CommandEntry selectedCommand = currentCommand;
+            bool commandReadOnly = false;
+            CommandRuntimeSnapshot snapshot;
+
+            if (selectedCommand == null)
+            {
+                return;
+            }
+
+            snapshot = commandManager.GetSnapshot(selectedCommand.Id);
+            commandReadOnly = snapshot.Status == CommandStatus.Running ||
+                snapshot.Status == CommandStatus.Starting ||
+                snapshot.Status == CommandStatus.Stopping;
+
+            using (CommandDialog dialog = new CommandDialog(CloneCommand(selectedCommand), commandReadOnly))
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK || dialog.Result == null)
+                {
+                    return;
+                }
+
+                CopyCommand(dialog.Result, selectedCommand);
+                PersistAndSyncCommands();
+                RefreshCommandList();
+                SelectCommand(selectedCommand);
+            }
+        }
+
+        private void OnDeleteCommandClicked(object sender, EventArgs e)
+        {
+            CommandEntry selectedCommand = currentCommand;
+            CommandRuntimeSnapshot snapshot;
+
+            if (selectedCommand == null)
+            {
+                return;
+            }
+
+            snapshot = commandManager.GetSnapshot(selectedCommand.Id);
+
+            if (snapshot.Status == CommandStatus.Running ||
+                snapshot.Status == CommandStatus.Starting ||
+                snapshot.Status == CommandStatus.Stopping)
+            {
+                MessageBox.Show(
+                    "\u8bf7\u5148\u505c\u6b62\u8be5\u547d\u4ee4\uff0c\u518d\u6267\u884c\u5220\u9664\u3002",
+                    AppName,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (MessageBox.Show(
+                    "\u786e\u8ba4\u5220\u9664\u547d\u4ee4\u201c" + selectedCommand.Name + "\u201d\uff1f",
+                    AppName,
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question) != DialogResult.Yes)
+            {
+                return;
+            }
+
+            commands.RemoveAll(delegate(CommandEntry command)
+            {
+                return string.Equals(command.Id, selectedCommand.Id, StringComparison.OrdinalIgnoreCase);
+            });
+
+            currentCommand = null;
+            PersistAndSyncCommands();
+            RefreshCommandList();
+
+            if (commands.Count > 0)
+            {
+                SelectCommand(commands[0]);
+            }
+            else
+            {
+                UpdateCommandSelectionVisuals();
+                RefreshLogsView();
+            }
+        }
+
+        private void OnStartStopCommandClicked(object sender, EventArgs e)
+        {
+            CommandRuntimeSnapshot snapshot;
+
+            if (currentCommand == null)
+            {
+                return;
+            }
+
+            snapshot = commandManager.GetSnapshot(currentCommand.Id);
+
+            if (snapshot.Status == CommandStatus.Running ||
+                snapshot.Status == CommandStatus.Starting ||
+                snapshot.Status == CommandStatus.Stopping ||
+                snapshot.Status == CommandStatus.WaitingRetry)
+            {
+                commandManager.Stop(currentCommand.Id);
+            }
+            else
+            {
+                commandManager.Start(currentCommand.Id);
+            }
+        }
+
+        private void OnAddSiteClicked(object sender, EventArgs e)
+        {
+            using (SiteDialog dialog = new SiteDialog(null))
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK || dialog.Result == null)
+                {
+                    return;
+                }
+
+                if (ContainsSiteUrl(dialog.Result.Url, null))
+                {
+                    MessageBox.Show(
+                        "\u8be5\u5730\u5740\u5df2\u7ecf\u5b58\u5728\u4e8e\u7ad9\u70b9\u5217\u8868\u4e2d\u3002",
+                        AppName,
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                    return;
+                }
+
+                sites.Add(dialog.Result);
+                PersistConfig();
+                RefreshSiteList();
+                SelectSite(dialog.Result);
+            }
+        }
+
+        private void OnEditSiteClicked(object sender, EventArgs e)
+        {
+            SiteEntry selectedSite = currentSite;
+
+            if (selectedSite == null)
+            {
+                return;
+            }
+
+            using (SiteDialog dialog = new SiteDialog(CloneSite(selectedSite)))
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK || dialog.Result == null)
+                {
+                    return;
+                }
+
+                if (ContainsSiteUrl(dialog.Result.Url, selectedSite.Id))
+                {
+                    MessageBox.Show(
+                        "\u8be5\u5730\u5740\u5df2\u7ecf\u5b58\u5728\u4e8e\u7ad9\u70b9\u5217\u8868\u4e2d\u3002",
+                        AppName,
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                    return;
+                }
+
+                CopySite(dialog.Result, selectedSite);
+                PersistConfig();
+                RefreshSiteList();
+                SelectSite(selectedSite);
+            }
+        }
+
+        private void OnDeleteSiteClicked(object sender, EventArgs e)
+        {
+            SiteEntry selectedSite = currentSite;
+            SiteViewState viewState;
+
+            if (selectedSite == null)
+            {
+                return;
+            }
+
+            if (sites.Count <= 1)
+            {
+                MessageBox.Show(
+                    "\u81f3\u5c11\u9700\u8981\u4fdd\u7559\u4e00\u4e2a\u7ad9\u70b9\u3002",
+                    AppName,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (MessageBox.Show(
+                    "\u786e\u8ba4\u5220\u9664\u7ad9\u70b9\u201c" + selectedSite.Name + "\u201d\uff1f",
+                    AppName,
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question) != DialogResult.Yes)
+            {
+                return;
+            }
+
+            sites.RemoveAll(delegate(SiteEntry site)
+            {
+                return string.Equals(site.Id, selectedSite.Id, StringComparison.OrdinalIgnoreCase);
+            });
+
+            if (siteViews.TryGetValue(selectedSite.Id, out viewState))
+            {
+                webViewHost.Controls.Remove(viewState.WebView);
+                viewState.WebView.Dispose();
+                siteViews.Remove(selectedSite.Id);
+            }
+
+            currentSite = null;
+            PersistConfig();
+            RefreshSiteList();
+
+            if (sites.Count > 0)
+            {
+                SelectSite(sites[0]);
+            }
+            else
+            {
+                UpdateSiteSelectionVisuals();
+                RefreshSiteButtons();
+            }
+        }
+
+        private void OnOpenSiteClicked(object sender, EventArgs e)
+        {
+            if (currentSite != null)
+            {
+                SetWorkspaceMode(WorkspaceMode.Web);
+                ShowSite(currentSite);
+            }
+        }
+
+        private void OnReloadSiteClicked(object sender, EventArgs e)
+        {
+            ReloadCurrentSite();
+        }
+
+        private void ReloadCurrentSite()
+        {
+            SiteViewState state;
+
+            if (currentSite == null)
+            {
+                statusLabel.Text = "\u5f53\u524d\u672a\u9009\u62e9\u7ad9\u70b9\u3002";
+                return;
+            }
+
+            if (siteViews.TryGetValue(currentSite.Id, out state) &&
+                state.IsInitialized &&
+                state.WebView.CoreWebView2 != null)
+            {
+                if (!string.Equals(state.LastNavigatedUrl, currentSite.Url, StringComparison.OrdinalIgnoreCase))
+                {
+                    state.LastNavigatedUrl = currentSite.Url;
+                    state.WebView.CoreWebView2.Navigate(currentSite.Url);
+                }
+                else
+                {
+                    state.WebView.CoreWebView2.Reload();
+                }
+
+                statusLabel.Text = "\u6b63\u5728\u5237\u65b0 " + currentSite.Name + "...";
+                return;
+            }
+
+            ShowSite(currentSite);
+        }
+
+        private void OnClearLogsClicked(object sender, EventArgs e)
+        {
+            if (currentCommand != null)
+            {
+                commandManager.ClearLogs(currentCommand.Id);
+                RefreshLogsView();
+            }
+        }
+
+        private void OnCopyLogsClicked(object sender, EventArgs e)
+        {
+            if (!string.IsNullOrWhiteSpace(logsTextBox.Text))
+            {
+                try
+                {
+                    Clipboard.SetText(logsTextBox.Text);
+                    statusLabel.Text = "\u65e5\u5fd7\u5df2\u590d\u5236\u5230\u526a\u8d34\u677f\u3002";
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(
+                        "\u65e0\u6cd5\u590d\u5236\u65e5\u5fd7\u3002\r\n\r\n" + ex.Message,
+                        AppName,
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private void RefreshCommandButtons()
+        {
+            CommandRuntimeSnapshot snapshot = currentCommand == null
+                ? null
+                : commandManager.GetSnapshot(currentCommand.Id);
+            bool hasCommand = currentCommand != null;
+            bool isBusy = snapshot != null &&
+                (snapshot.Status == CommandStatus.Starting || snapshot.Status == CommandStatus.Stopping);
+            bool isActive = snapshot != null &&
+                (snapshot.Status == CommandStatus.Running ||
+                 snapshot.Status == CommandStatus.Starting ||
+                 snapshot.Status == CommandStatus.Stopping ||
+                 snapshot.Status == CommandStatus.WaitingRetry);
+
+            editCommandButton.Enabled = hasCommand;
+            deleteCommandButton.Enabled = hasCommand && !isActive;
+            startStopCommandButton.Enabled = hasCommand;
+            if (!hasCommand)
+            {
+                startStopCommandButton.Text = "\u542f\u52a8";
+                return;
+            }
+
+            startStopCommandButton.Text = isActive ? "\u505c\u6b62" : "\u542f\u52a8";
+        }
+
+        private void RefreshSiteButtons()
+        {
+            bool hasSite = currentSite != null;
+
+            editSiteButton.Enabled = hasSite;
+            deleteSiteButton.Enabled = hasSite && sites.Count > 1;
+            openSiteButton.Enabled = hasSite;
+            reloadSiteButton.Enabled = hasSite;
+        }
+
+        private void RefreshLogsView()
+        {
+            CommandRuntimeSnapshot snapshot;
+            string[] lines;
+
+            if (currentCommand == null)
+            {
+                currentCommandLabel.Text = "\u672a\u9009\u62e9\u547d\u4ee4";
+                commandStatusBadge.Text = "\u5df2\u505c\u6b62";
+                ApplyBadgeStyle(commandStatusBadge, CommandStatus.Stopped);
+                logsTextBox.Text = string.Empty;
+                lastLogAutoScrollEnabled = true;
+                return;
+            }
+
+            snapshot = commandManager.GetSnapshot(currentCommand.Id);
+            lines = commandManager.GetLogs(currentCommand.Id);
+            currentCommandLabel.Text = currentCommand.Name;
+            commandStatusBadge.Text = snapshot.GetDisplayStatus();
+            ApplyBadgeStyle(commandStatusBadge, snapshot.Status);
+            bool shouldAutoScroll = IsNearBottom(logsTextBox);
+            string newText = string.Join(Environment.NewLine, lines);
+
+            if (!string.Equals(logsTextBox.Text, newText, StringComparison.Ordinal))
+            {
+                logsTextBox.Text = newText;
+            }
+
+            if (lines.Length > 0 && (shouldAutoScroll || lastLogAutoScrollEnabled))
+            {
+                logsTextBox.SelectionStart = logsTextBox.TextLength;
+                logsTextBox.ScrollToCaret();
+            }
+
+            lastLogAutoScrollEnabled = shouldAutoScroll;
+        }
+
+        private void SetWorkspaceMode(WorkspaceMode mode)
+        {
+            workspaceMode = mode;
+            webPanel.Visible = mode == WorkspaceMode.Web;
+            logsPanel.Visible = mode == WorkspaceMode.Logs;
+            ApplyViewToggleState(webViewModeButton, mode == WorkspaceMode.Web);
+            ApplyViewToggleState(logsViewModeButton, mode == WorkspaceMode.Logs);
+            Text = mode == WorkspaceMode.Web
+                ? currentSite == null ? AppName : AppName + " - " + currentSite.Name
+                : currentCommand == null ? AppName : AppName + " - " + currentCommand.Name;
+
+            if (mode == WorkspaceMode.Web && currentSite != null)
+            {
+                ShowSite(currentSite);
+            }
+            else if (mode == WorkspaceMode.Logs)
+            {
+                RefreshLogsView();
+            }
+        }
+
+        private void OnToggleSidebarClicked(object sender, EventArgs e)
+        {
+            SetSidebarHidden(!sidebarHidden);
+        }
+
+        private void OnShowSidebarClicked(object sender, EventArgs e)
+        {
+            SetSidebarHidden(false);
+        }
+
+        private void SetSidebarHidden(bool hidden)
+        {
+            sidebarHidden = hidden;
+            if (!hidden && expandedSidebarWidth <= 0)
+            {
+                expandedSidebarWidth = 390;
+            }
+
+            rootPanel.ColumnStyles[0].Width = hidden ? 0f : expandedSidebarWidth;
+            rootPanel.ColumnStyles[1].Width = hidden ? 44f : 0f;
+            leftSidebar.Padding = new Padding(16, 16, 16, 16);
+            toggleSidebarButton.Text = hidden ? ">" : "\u6536\u8d77";
+            collapsedSidebarPanel.Visible = hidden;
+            leftSidebar.Visible = !hidden;
+            rootPanel.PerformLayout();
+            workspacePanel.PerformLayout();
+            statusLabel.Text = hidden
+                ? "\u5de6\u4fa7\u63a7\u5236\u53f0\u5df2\u9690\u85cf\u3002"
+                : "\u5de6\u4fa7\u63a7\u5236\u53f0\u5df2\u5c55\u5f00\u3002";
+        }
+
+        private void UpdateStatusSummary()
+        {
+            int running = commandManager.GetRunningCount();
+            int waitingRetry = commandManager.GetWaitingRetryCount();
+            string startupText = WindowsStartupManager.IsEnabled()
+                ? "\u5df2\u542f\u7528\u81ea\u542f"
+                : "\u672a\u542f\u7528\u81ea\u542f";
+
+            summaryLabel.Text =
+                "\u547d\u4ee4 " + commands.Count + " \u4e2a\uff0c\u8fd0\u884c\u4e2d " +
+                running + " \u4e2a\uff0c\u7b49\u5f85\u91cd\u8bd5 " +
+                waitingRetry + " \u4e2a\uff0c\u7ad9\u70b9 " +
+                sites.Count + " \u4e2a\uff0c" +
+                startupText + "\u3002";
+            notifyIcon.Text = AppName + " - \u8fd0\u884c\u4e2d " + running + "/" + commands.Count;
+        }
+
+        private void RefreshCommandCardsState()
+        {
+            foreach (CommandEntry command in commands)
+            {
+                RefreshCommandCardState(command.Id);
+            }
+        }
+
+        private void RefreshCommandCardState(string commandId)
+        {
+            CommandSidebarCard card;
+
+            if (string.IsNullOrWhiteSpace(commandId) || !commandCards.TryGetValue(commandId, out card))
+            {
+                return;
+            }
+
+            card.Bind(card.Command, commandManager.GetSnapshot(commandId));
+            card.Selected = currentCommand != null &&
+                string.Equals(currentCommand.Id, commandId, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void UpdateCommandSelectionVisuals()
+        {
+            foreach (KeyValuePair<string, CommandSidebarCard> pair in commandCards)
+            {
+                pair.Value.Selected = currentCommand != null &&
+                    string.Equals(currentCommand.Id, pair.Key, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        private void UpdateSiteSelectionVisuals()
+        {
+            foreach (KeyValuePair<string, SiteSidebarCard> pair in siteCards)
+            {
+                pair.Value.Selected = currentSite != null &&
+                    string.Equals(currentSite.Id, pair.Key, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        private void OnCommandListPanelResize(object sender, EventArgs e)
+        {
+            ConstrainSidebarListWidth(commandListPanel, commandListContent);
+        }
+
+        private void OnSiteListPanelResize(object sender, EventArgs e)
+        {
+            ConstrainSidebarListWidth(siteListPanel, siteListContent);
+        }
+
+        private void ConstrainSidebarListWidth(BufferedScrollPanel scrollPanel, Control content)
+        {
+            int targetWidth;
+
+            if (scrollPanel == null || content == null)
+            {
+                return;
+            }
+
+            targetWidth = Math.Max(
+                180,
+                scrollPanel.ClientSize.Width - SystemInformation.VerticalScrollBarWidth);
+
+            if (content.Width != targetWidth)
+            {
+                content.Width = targetWidth;
+            }
+        }
+
+        private TableLayoutPanel CreateSidebarListContent()
+        {
+            TableLayoutPanel panel = new TableLayoutPanel();
+            panel.Dock = DockStyle.Top;
+            panel.AutoSize = true;
+            panel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            panel.Margin = new Padding(0);
+            panel.Padding = new Padding(8, 6, 8, 0);
+            panel.ColumnCount = 1;
+            panel.RowCount = 0;
+            panel.GrowStyle = TableLayoutPanelGrowStyle.AddRows;
+            panel.BackColor = Color.FromArgb(248, 250, 252);
+            panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            return panel;
+        }
+
+        private void PersistAndSyncCommands()
+        {
+            PersistConfig();
+            commandManager.SyncCommands(commands);
+        }
+
+        private void PersistConfig()
+        {
+            AppConfigStore.Save(new AppConfig
+            {
+                Sites = sites.ToArray(),
+                Commands = commands.ToArray()
+            });
+        }
+
+        private void ApplyBadgeStyle(Label badge, CommandStatus status)
+        {
+            if (status == CommandStatus.Running)
+            {
+                badge.BackColor = Color.FromArgb(219, 243, 224);
+                badge.ForeColor = Color.FromArgb(38, 110, 62);
+                return;
+            }
+
+            if (status == CommandStatus.Error)
+            {
+                badge.BackColor = Color.FromArgb(251, 225, 228);
+                badge.ForeColor = Color.FromArgb(148, 33, 48);
+                return;
+            }
+
+            if (status == CommandStatus.Starting ||
+                status == CommandStatus.Stopping ||
+                status == CommandStatus.WaitingRetry)
+            {
+                badge.BackColor = Color.FromArgb(255, 240, 205);
+                badge.ForeColor = Color.FromArgb(145, 95, 15);
+                return;
+            }
+
+            badge.BackColor = Color.FromArgb(234, 239, 244);
+            badge.ForeColor = Color.FromArgb(79, 89, 100);
+        }
+
+        private void OnResize(object sender, EventArgs e)
+        {
+            if (WindowState == FormWindowState.Minimized)
+            {
+                HideToTray();
+            }
+        }
+
+        private void OnTrayStartupMenuClicked(object sender, EventArgs e)
+        {
+            if (updatingStartupToggle)
+            {
+                return;
+            }
+
+            try
+            {
+                WindowsStartupManager.SetEnabled(trayStartupMenuItem.Checked);
+                UpdateStatusSummary();
+                statusLabel.Text = trayStartupMenuItem.Checked
+                    ? "\u5df2\u5f00\u542f\u5f00\u673a\u81ea\u542f\u3002"
+                    : "\u5df2\u5173\u95ed\u5f00\u673a\u81ea\u542f\u3002";
+            }
+            catch (Exception ex)
+            {
+                updatingStartupToggle = true;
+                trayStartupMenuItem.Checked = WindowsStartupManager.IsEnabled();
+                updatingStartupToggle = false;
+                MessageBox.Show(
+                    "\u65e0\u6cd5\u66f4\u65b0\u5f00\u673a\u81ea\u542f\u8bbe\u7f6e\u3002\r\n\r\n" + ex.Message,
+                    AppName,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
+        private void OnStopAllCommandsClicked(object sender, EventArgs e)
+        {
+            commandManager.StopAll();
+            statusLabel.Text = "\u6b63\u5728\u505c\u6b62\u6240\u6709\u547d\u4ee4...";
+        }
+
+        private void OnFormClosing(object sender, FormClosingEventArgs e)
+        {
+            if (allowExit ||
+                e.CloseReason == CloseReason.ApplicationExitCall ||
+                e.CloseReason == CloseReason.WindowsShutDown ||
+                e.CloseReason == CloseReason.TaskManagerClosing)
+            {
+                notifyIcon.Visible = false;
+                uiRefreshTimer.Stop();
+                commandManager.Dispose();
+                return;
+            }
+
+            e.Cancel = true;
+            HideToTray();
+        }
+
+        private void HideToTray()
+        {
+            Hide();
+            ShowInTaskbar = false;
+
+            if (trayHintShown)
+            {
+                return;
+            }
+
+            notifyIcon.BalloonTipTitle = AppName;
+            notifyIcon.BalloonTipText =
+                "Switch \u5df2\u7f29\u5c0f\u5230\u7cfb\u7edf\u6258\u76d8\uff0c\u53cc\u51fb\u56fe\u6807\u53ef\u4ee5\u6062\u590d\u4e3b\u754c\u9762\u3002";
+            notifyIcon.ShowBalloonTip(2500);
+            trayHintShown = true;
+        }
+
+        private void RestoreFromTray()
+        {
+            Show();
+            ShowInTaskbar = true;
+            WindowState = FormWindowState.Normal;
+            Activate();
+        }
+
+        private void ExitApplication()
+        {
+            if (commandManager.HasActiveOrPendingCommands())
+            {
+                if (MessageBox.Show(
+                        "\u4ecd\u6709\u547d\u4ee4\u6b63\u5728\u8fd0\u884c\uff0c\u662f\u5426\u505c\u6b62\u540e\u9000\u51fa\uff1f",
+                        AppName,
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question) != DialogResult.Yes)
+                {
+                    return;
+                }
+
+                commandManager.StopAll();
+            }
+
+            allowExit = true;
+            notifyIcon.Visible = false;
+            Close();
+        }
+
+        private bool ContainsSiteUrl(string url, string ignoredSiteId)
+        {
+            foreach (SiteEntry site in sites)
+            {
+                if (!string.Equals(site.Id, ignoredSiteId, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(site.Url, url, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private SiteEntry CloneSite(SiteEntry site)
+        {
+            return new SiteEntry
+            {
+                Id = site.Id,
+                Name = site.Name,
+                Url = site.Url
+            };
+        }
+
+        private void CopySite(SiteEntry source, SiteEntry target)
+        {
+            target.Name = source.Name;
+            target.Url = source.Url;
+        }
+
+        private CommandEntry CloneCommand(CommandEntry command)
+        {
+            return new CommandEntry
+            {
+                Id = command.Id,
+                Name = command.Name,
+                Command = command.Command,
+                RunMode = command.RunMode,
+                EnabledOnStart = command.EnabledOnStart,
+                AutoRetry = new AutoRetryConfig
+                {
+                    Enabled = command.AutoRetry == null ? false : command.AutoRetry.Enabled,
+                    MaxAttempts = command.AutoRetry == null ? 0 : command.AutoRetry.MaxAttempts,
+                    InitialDelaySeconds = command.AutoRetry == null ? 3 : command.AutoRetry.InitialDelaySeconds,
+                    MaxDelaySeconds = command.AutoRetry == null ? 60 : command.AutoRetry.MaxDelaySeconds,
+                    ResetAfterSeconds = command.AutoRetry == null ? 300 : command.AutoRetry.ResetAfterSeconds
+                }
+            };
+        }
+
+        private void CopyCommand(CommandEntry source, CommandEntry target)
+        {
+            target.Name = source.Name;
+            target.Command = source.Command;
+            target.RunMode = source.RunMode;
+            target.EnabledOnStart = source.EnabledOnStart;
+            target.AutoRetry = source.AutoRetry;
+        }
+
+        private Button CreatePrimaryButton(string text, int x, int y, int width)
+        {
+            Button button = new Button();
+            button.Text = text;
+            button.FlatStyle = FlatStyle.Flat;
+            button.FlatAppearance.BorderSize = 0;
+            button.BackColor = Color.FromArgb(28, 113, 96);
+            button.ForeColor = Color.White;
+            button.Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold);
+            button.Size = new Size(width, 34);
+            button.Location = new Point(x, y);
+            button.Cursor = Cursors.Hand;
+            return button;
+        }
+
+        private Button CreateSecondaryButton(string text, int x, int y, int width)
+        {
+            Button button = new Button();
+            button.Text = text;
+            button.FlatStyle = FlatStyle.Flat;
+            button.FlatAppearance.BorderColor = Color.FromArgb(212, 220, 228);
+            button.FlatAppearance.BorderSize = 1;
+            button.BackColor = Color.FromArgb(249, 251, 252);
+            button.ForeColor = Color.FromArgb(41, 51, 65);
+            button.Font = new Font("Microsoft YaHei UI", 9.25f, FontStyle.Regular);
+            button.Size = new Size(width, 34);
+            button.Location = new Point(x, y);
+            button.Cursor = Cursors.Hand;
+            return button;
+        }
+
+        private Button CreateViewToggleButton(string text, int columnIndex)
+        {
+            Button button = new Button();
+            button.Text = text;
+            button.FlatStyle = FlatStyle.Flat;
+            button.FlatAppearance.BorderSize = 0;
+            button.Font = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold);
+            button.Size = new Size(84, 34);
+            button.Location = new Point(columnIndex * 88, 4);
+            button.Cursor = Cursors.Hand;
+            return button;
+        }
+
+        private void ApplyViewToggleState(Button button, bool active)
+        {
+            if (active)
+            {
+                button.BackColor = Color.FromArgb(28, 113, 96);
+                button.ForeColor = Color.White;
+                return;
+            }
+
+            button.BackColor = Color.FromArgb(239, 244, 242);
+            button.ForeColor = Color.FromArgb(55, 65, 79);
+        }
+
+        private bool IsNearBottom(TextBox textBox)
+        {
+            const int EM_GETFIRSTVISIBLELINE = 0x00CE;
+            int firstVisibleLine = SendMessage(textBox.Handle, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero).ToInt32();
+            int lineHeight = textBox.Font.Height;
+            int visibleLines = Math.Max(1, textBox.ClientSize.Height / Math.Max(1, lineHeight));
+            int totalLines = Math.Max(0, textBox.GetLineFromCharIndex(textBox.TextLength) + 1);
+
+            return firstVisibleLine + visibleLines >= totalLines - 1;
+        }
+
+        private sealed class SiteViewState
+        {
+            public SiteEntry Site { get; set; }
+
+            public WebView2 WebView { get; set; }
+
+            public bool IsInitialized { get; set; }
+
+            public bool InitializationStarted { get; set; }
+
+            public string LastNavigatedUrl { get; set; }
+        }
+    }
+}
