@@ -17,6 +17,8 @@ namespace LocalWebTrayShell
         private const int SidebarMaxWidth = 560;
         private const int SidebarCollapseThreshold = 96;
         private const int SidebarResizeIntervalMs = 16;
+        private const int WM_SYSCOMMAND = 0x0112;
+        private const int SC_CLOSE = 0xF060;
 
         [DllImport("user32.dll")]
         private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
@@ -73,6 +75,7 @@ namespace LocalWebTrayShell
         private readonly Panel webViewHost;
         private readonly Timer uiRefreshTimer;
         private readonly Timer sidebarResizeTimer;
+        private readonly Timer trayRestoreTimer;
         private readonly ToolStripMenuItem trayStartupMenuItem;
         private readonly Dictionary<string, CommandSidebarCard> commandCards;
         private readonly Dictionary<string, SiteSidebarCard> siteCards;
@@ -92,6 +95,8 @@ namespace LocalWebTrayShell
         private bool sidebarHidden;
         private bool resizingSidebar;
         private bool hidingToTray;
+        private bool parkedInTray;
+        private bool restoringFromTray;
         private int sidebarDragStartX;
         private int sidebarDragStartWidth;
         private int sidebarPendingWidth;
@@ -99,6 +104,8 @@ namespace LocalWebTrayShell
         private int sidebarFrozenWorkspaceContentWidth;
         private DateTime statusSummaryHoldUntilUtc;
         private int expandedSidebarWidth;
+        private Rectangle preTrayBounds;
+        private FormWindowState preTrayWindowState;
 
         public ShellForm()
         {
@@ -124,6 +131,8 @@ namespace LocalWebTrayShell
             AutoScaleMode = AutoScaleMode.Dpi;
             Icon = appIcon;
             BackColor = UiTheme.WindowBackground;
+            preTrayBounds = Bounds;
+            preTrayWindowState = WindowState;
 
             statusLabel = new ToolStripStatusLabel("\u6b63\u5728\u52a0\u8f7d\u5de5\u4f5c\u53f0...");
             statusStrip = new StatusStrip();
@@ -157,6 +166,10 @@ namespace LocalWebTrayShell
             sidebarResizeTimer = new Timer();
             sidebarResizeTimer.Interval = SidebarResizeIntervalMs;
             sidebarResizeTimer.Tick += OnSidebarResizeTimerTick;
+
+            trayRestoreTimer = new Timer();
+            trayRestoreTimer.Interval = 60;
+            trayRestoreTimer.Tick += OnTrayRestoreTimerTick;
 
             brandPanel = new Panel();
             brandPanel.Dock = DockStyle.Top;
@@ -633,8 +646,21 @@ namespace LocalWebTrayShell
                     "\u65e0\u6cd5\u521d\u59cb\u5316 WebView2\u3002\r\n\r\n" + ex.Message,
                     AppName,
                     MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+                MessageBoxIcon.Error);
             }
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (!allowExit &&
+                m.Msg == WM_SYSCOMMAND &&
+                ((int)m.WParam & 0xFFF0) == SC_CLOSE)
+            {
+                QueueHideToTray();
+                return;
+            }
+
+            base.WndProc(ref m);
         }
 
         private void OnUiRefreshTimerTick(object sender, EventArgs e)
@@ -1897,6 +1923,7 @@ namespace LocalWebTrayShell
             {
                 notifyIcon.Visible = false;
                 uiRefreshTimer.Stop();
+                trayRestoreTimer.Stop();
                 commandManager.Dispose();
                 return;
             }
@@ -1929,12 +1956,23 @@ namespace LocalWebTrayShell
 
         private void HideToTray()
         {
-            if (!Visible && !ShowInTaskbar)
+            if (parkedInTray)
             {
                 return;
             }
 
-            Hide();
+            restoringFromTray = false;
+            trayRestoreTimer.Stop();
+            preTrayWindowState = WindowState;
+            preTrayBounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+            if (preTrayBounds.Width <= 0 || preTrayBounds.Height <= 0)
+            {
+                preTrayBounds = Bounds;
+            }
+
+            parkedInTray = true;
+            WindowState = FormWindowState.Normal;
+            Bounds = GetTrayParkingBounds(preTrayBounds.Size);
             ShowInTaskbar = false;
 
             if (trayHintShown)
@@ -1952,10 +1990,69 @@ namespace LocalWebTrayShell
         private void RestoreFromTray()
         {
             hidingToTray = false;
-            Show();
+            if (parkedInTray)
+            {
+                if (restoringFromTray)
+                {
+                    return;
+                }
+
+                restoringFromTray = true;
+                ShowInTaskbar = true;
+                trayRestoreTimer.Stop();
+                trayRestoreTimer.Start();
+                return;
+            }
+
+            if (!Visible)
+            {
+                Show();
+            }
+
             ShowInTaskbar = true;
-            WindowState = FormWindowState.Normal;
+            WindowState = preTrayWindowState == FormWindowState.Minimized
+                ? FormWindowState.Normal
+                : preTrayWindowState;
             Activate();
+        }
+
+        private void OnTrayRestoreTimerTick(object sender, EventArgs e)
+        {
+            trayRestoreTimer.Stop();
+            FinishRestoreFromTray();
+        }
+
+        private void FinishRestoreFromTray()
+        {
+            if (parkedInTray)
+            {
+                Bounds = preTrayBounds;
+                parkedInTray = false;
+            }
+
+            if (!Visible)
+            {
+                Show();
+            }
+
+            ShowInTaskbar = true;
+            WindowState = preTrayWindowState == FormWindowState.Minimized
+                ? FormWindowState.Normal
+                : preTrayWindowState;
+            restoringFromTray = false;
+            Activate();
+        }
+
+        private Rectangle GetTrayParkingBounds(Size size)
+        {
+            int width = Math.Max(MinimumSize.Width, size.Width);
+            int height = Math.Max(MinimumSize.Height, size.Height);
+
+            return new Rectangle(
+                SystemInformation.VirtualScreen.Left - width - 80,
+                SystemInformation.VirtualScreen.Top - height - 80,
+                width,
+                height);
         }
 
         private void ExitApplication()
