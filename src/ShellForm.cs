@@ -3,6 +3,7 @@ using Microsoft.Web.WebView2.WinForms;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
@@ -33,12 +34,18 @@ namespace LocalWebTrayShell
         private const int HTBOTTOMRIGHT = 17;
         private const int TitleBarHeight = 44;
         private const int ResizeGripSize = 8;
+        private const int DWMWA_TRANSITIONS_FORCEDISABLED = 3;
+        private const int WS_MINIMIZEBOX = 0x20000;
+        private const int WS_MAXIMIZEBOX = 0x10000;
 
         [DllImport("user32.dll")]
         private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
         [DllImport("user32.dll")]
         private static extern bool ReleaseCapture();
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int pvAttribute, int cbAttribute);
 
         private readonly NotifyIcon notifyIcon;
         private readonly ContextMenuStrip trayMenu;
@@ -98,7 +105,6 @@ namespace LocalWebTrayShell
         private readonly Panel webViewHost;
         private readonly Timer uiRefreshTimer;
         private readonly Timer sidebarResizeTimer;
-        private readonly Timer trayRestoreTimer;
         private readonly ToolStripMenuItem trayStartupMenuItem;
         private readonly Dictionary<string, CommandSidebarCard> commandCards;
         private readonly Dictionary<string, SiteSidebarCard> siteCards;
@@ -119,7 +125,6 @@ namespace LocalWebTrayShell
         private bool resizingSidebar;
         private bool hidingToTray;
         private bool parkedInTray;
-        private bool restoringFromTray;
         private int sidebarDragStartX;
         private int sidebarDragStartWidth;
         private int sidebarPendingWidth;
@@ -127,8 +132,6 @@ namespace LocalWebTrayShell
         private int sidebarFrozenWorkspaceContentWidth;
         private DateTime statusSummaryHoldUntilUtc;
         private int expandedSidebarWidth;
-        private Rectangle preTrayBounds;
-        private FormWindowState preTrayWindowState;
 
         public ShellForm()
         {
@@ -155,8 +158,6 @@ namespace LocalWebTrayShell
             AutoScaleMode = AutoScaleMode.Dpi;
             Icon = appIcon;
             BackColor = UiTheme.WindowBackground;
-            preTrayBounds = Bounds;
-            preTrayWindowState = WindowState;
 
             statusLabel = new ToolStripStatusLabel("\u6b63\u5728\u52a0\u8f7d\u5de5\u4f5c\u53f0...");
             statusStrip = new StatusStrip();
@@ -231,10 +232,6 @@ namespace LocalWebTrayShell
             sidebarResizeTimer = new Timer();
             sidebarResizeTimer.Interval = SidebarResizeIntervalMs;
             sidebarResizeTimer.Tick += OnSidebarResizeTimerTick;
-
-            trayRestoreTimer = new Timer();
-            trayRestoreTimer.Interval = 60;
-            trayRestoreTimer.Tick += OnTrayRestoreTimerTick;
 
             brandPanel = new Panel();
             brandPanel.Dock = DockStyle.Top;
@@ -674,6 +671,7 @@ namespace LocalWebTrayShell
             RefreshCommandButtons();
             RefreshSiteButtons();
             UpdateStatusSummary();
+            ApplyDoubleBuffering();
         }
 
         private async void OnShown(object sender, EventArgs e)
@@ -713,6 +711,47 @@ namespace LocalWebTrayShell
                     AppName,
                     MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
+            }
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                // The form uses FormBorderStyle.None with a custom title bar, so
+                // WinForms omits WS_MINIMIZEBOX/WS_MAXIMIZEBOX. Without them the
+                // window manager mishandles taskbar-initiated restore on a
+                // borderless top-level window: the window flashes on, instantly
+                // collapses back to minimized, and only settles back to normal
+                // ~1s later. Re-adding both styles (they add no visible chrome
+                // because there is no caption bar) gives the state machine the
+                // minimize/restore capability it expects, so the restore is
+                // clean and immediate.
+                CreateParams cp = base.CreateParams;
+                cp.Style |= WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+                return cp;
+            }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+
+            // Disable DWM window-state transitions (the subtle fade/scale played
+            // when the window is shown, hidden, minimized or maximized). On
+            // restore-from-tray, DWM otherwise presents the window's own surface
+            // through a brief "blank then content" transition, while the
+            // separately-composited WebView2 child appears instantly -- which is
+            // exactly the "chrome blanks for half a second" effect. Killing the
+            // transition makes the whole window, chrome included, snap in at once.
+            int disable = 1;
+            try
+            {
+                DwmSetWindowAttribute(Handle, DWMWA_TRANSITIONS_FORCEDISABLED, ref disable, sizeof(int));
+            }
+            catch
+            {
+                // dwmapi ships on every supported Windows; ignore any failure.
             }
         }
 
@@ -2051,6 +2090,47 @@ namespace LocalWebTrayShell
             badge.Invalidate();
         }
 
+        // Enables double buffering on the form's WinForms chrome (title bar,
+        // sidebar, cards) so a freshly shown window paints in a single composed
+        // pass instead of controls popping in one by one from a blank erase.
+        // Applied per-control rather than via WS_EX_COMPOSITED on purpose: a
+        // whole-window composited style conflicts with the HWND-hosted WebView2
+        // and would make the web surface flicker black while resizing.
+        private void ApplyDoubleBuffering()
+        {
+            EnableDoubleBuffered(this);
+            foreach (Control control in Controls)
+            {
+                EnableDoubleBufferedRecursive(control);
+            }
+        }
+
+        private static void EnableDoubleBufferedRecursive(Control control)
+        {
+            EnableDoubleBuffered(control);
+            foreach (Control child in control.Controls)
+            {
+                EnableDoubleBufferedRecursive(child);
+            }
+        }
+
+        private static void EnableDoubleBuffered(Control control)
+        {
+            if (control is WebView2)
+            {
+                return;
+            }
+
+            // DoubleBuffered is protected; flip it via reflection so this works
+            // for the stock Panel/Label/TableLayoutPanel types used throughout.
+            control.GetType().InvokeMember(
+                "DoubleBuffered",
+                BindingFlags.SetProperty | BindingFlags.Instance | BindingFlags.NonPublic,
+                null,
+                control,
+                new object[] { true });
+        }
+
         private void OnResize(object sender, EventArgs e)
         {
             if (maximizeButton != null)
@@ -2164,7 +2244,6 @@ namespace LocalWebTrayShell
             {
                 notifyIcon.Visible = false;
                 uiRefreshTimer.Stop();
-                trayRestoreTimer.Stop();
                 commandManager.Dispose();
                 return;
             }
@@ -2202,19 +2281,15 @@ namespace LocalWebTrayShell
                 return;
             }
 
-            restoringFromTray = false;
-            trayRestoreTimer.Stop();
-            preTrayWindowState = WindowState;
-            preTrayBounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
-            if (preTrayBounds.Width <= 0 || preTrayBounds.Height <= 0)
-            {
-                preTrayBounds = Bounds;
-            }
-
+            // Hide() drops the taskbar button on its own and keeps every hosted
+            // WebView2 page fully loaded. Form.ShowInTaskbar must NOT be toggled
+            // here: changing it forces WinForms to recreate the top-level window
+            // handle, which detaches each WebView2 controller and reloads its
+            // page -- the source of the multi-second delay and the refresh flash
+            // on restore. Hide()/Show() preserve the handle, so the browser
+            // surfaces and their page state survive the round trip.
             parkedInTray = true;
-            WindowState = FormWindowState.Normal;
-            Bounds = GetTrayParkingBounds(preTrayBounds.Size);
-            ShowInTaskbar = false;
+            Hide();
 
             if (trayHintShown)
             {
@@ -2231,44 +2306,27 @@ namespace LocalWebTrayShell
         private void RestoreFromTray()
         {
             hidingToTray = false;
-            if (parkedInTray)
+            if (!parkedInTray)
             {
-                if (restoringFromTray)
+                if (!Visible)
                 {
-                    return;
+                    Show();
                 }
 
-                restoringFromTray = true;
-                ShowInTaskbar = true;
-                trayRestoreTimer.Stop();
-                trayRestoreTimer.Start();
+                Activate();
                 return;
             }
 
-            if (!Visible)
+            parkedInTray = false;
+
+            // A window that was minimized before being parked to the tray should
+            // surface as a normal window; other states (normal/maximized) are
+            // already preserved across Hide()/Show(). Resolve this before showing
+            // so the window never flashes through the minimized state, and never
+            // touch ShowInTaskbar so the handle (and the WebView2 pages) stay put.
+            if (WindowState == FormWindowState.Minimized)
             {
-                Show();
-            }
-
-            ShowInTaskbar = true;
-            WindowState = preTrayWindowState == FormWindowState.Minimized
-                ? FormWindowState.Normal
-                : preTrayWindowState;
-            Activate();
-        }
-
-        private void OnTrayRestoreTimerTick(object sender, EventArgs e)
-        {
-            trayRestoreTimer.Stop();
-            FinishRestoreFromTray();
-        }
-
-        private void FinishRestoreFromTray()
-        {
-            if (parkedInTray)
-            {
-                Bounds = preTrayBounds;
-                parkedInTray = false;
+                WindowState = FormWindowState.Normal;
             }
 
             if (!Visible)
@@ -2276,24 +2334,7 @@ namespace LocalWebTrayShell
                 Show();
             }
 
-            ShowInTaskbar = true;
-            WindowState = preTrayWindowState == FormWindowState.Minimized
-                ? FormWindowState.Normal
-                : preTrayWindowState;
-            restoringFromTray = false;
             Activate();
-        }
-
-        private Rectangle GetTrayParkingBounds(Size size)
-        {
-            int width = Math.Max(MinimumSize.Width, size.Width);
-            int height = Math.Max(MinimumSize.Height, size.Height);
-
-            return new Rectangle(
-                SystemInformation.VirtualScreen.Left - width - 80,
-                SystemInformation.VirtualScreen.Top - height - 80,
-                width,
-                height);
         }
 
         private void ExitApplication()
